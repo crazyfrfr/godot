@@ -46,11 +46,13 @@ private:
     int32_t format;
 
 	ACameraManager *manager = nullptr;
+	ACameraMetadata *metadata = nullptr;
 	ACameraDevice *device = nullptr;
 	AImageReader *reader = nullptr;
 	ACameraCaptureSession *session = nullptr;
 	ACaptureRequest *request = nullptr;
 
+	int32_t get_orientation() const;
     static void onError(void *context, ACameraDevice *p_device, int error);
 	static void onDisconnected(void *context, ACameraDevice *p_device);
     static void onImage(void *context, AImageReader *p_reader);
@@ -60,12 +62,15 @@ private:
 
 protected:
 public:
-	CameraFeedAndroid(ACameraManager *manager, const char *id, int32_t position, int32_t width, int32_t height,
-                      int32_t format, int32_t orientation);
+	CameraFeedAndroid(ACameraManager *manager, ACameraMetadata *metadata, const char *id, int32_t position);
 	virtual ~CameraFeedAndroid();
 
-	bool activate_feed();
-	void deactivate_feed();
+	bool set_format(int p_index, const Dictionary &p_parameters) override;
+	Array get_formats() const override;
+	FeedFormat get_format() const override;
+
+	bool activate_feed() override;
+	void deactivate_feed() override;
 };
 
 class CameraAndroid : public CameraServer {

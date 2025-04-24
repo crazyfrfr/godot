@@ -37,15 +37,16 @@
 // debugging.
 
 #ifndef IF_EQUAL_RETURN
-#define IF_EQUAL_RETURN(param, val) \
-	if (val == param)               \
+#define MAKE_FORMAT_CONST(suffix) AIMAGE_FORMAT_##suffix
+#define IF_EQUAL_RETURN(param, val)      \
+	if (MAKE_FORMAT_CONST(val) == param) \
 	return #val
 #endif
 
 String GetFormatName(const int32_t &format) {
-	IF_EQUAL_RETURN(format, AIMAGE_FORMAT_YUV_420_888);
-	IF_EQUAL_RETURN(format, AIMAGE_FORMAT_RGB_888);
-	IF_EQUAL_RETURN(format, AIMAGE_FORMAT_RGBA_8888);
+	IF_EQUAL_RETURN(format, YUV_420_888);
+	IF_EQUAL_RETURN(format, RGB_888);
+	IF_EQUAL_RETURN(format, RGBA_8888);
 
 	return "Unsupported";
 }
@@ -53,6 +54,26 @@ String GetFormatName(const int32_t &format) {
 //////////////////////////////////////////////////////////////////////////
 // CameraFeedAndroid - Subclass for our camera feed on Android
 
+CameraFeedAndroid(ACameraManager *manager, ACameraMetadata *metadata, const char *id, int32_t position) {
+	this->manager = manager;
+	this->metadata = metadata;
+	camera_id = id;
+	set_position(position);
+
+	name = vformat("%s", id);
+
+	// Position
+	if (position == ACAMERA_LENS_FACING_BACK) {
+		this->position = CameraFeed::FEED_BACK;
+		name += " | BACK";
+	}
+	if (position == ACAMERA_LENS_FACING_FRONT) {
+		this->position = CameraFeed::FEED_FRONT;
+		name += " | FRONT";
+	}
+}
+
+/*
 CameraFeedAndroid::CameraFeedAndroid(ACameraManager *manager, const char *id, int32_t position, int32_t width,
 		int32_t height, int32_t format, int32_t orientation) {
 	this->manager = manager;
@@ -98,6 +119,7 @@ CameraFeedAndroid::CameraFeedAndroid(ACameraManager *manager, const char *id, in
 	}
 	transform.rotate(real_t(imageRotation) * 0.015707963267949F);
 }
+*/
 
 CameraFeedAndroid::~CameraFeedAndroid() {
 	if (is_active()) {
@@ -105,7 +127,16 @@ CameraFeedAndroid::~CameraFeedAndroid() {
 	};
 }
 
+int32_t CameraFeedAndroid::get_orientation() {
+	// Get sensor orientation
+	ACameraMetadata_const_entry orientation;
+	ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_ORIENTATION, &orientation);
+	int32_t orientation = orientation.data.i32[0];
+	return orientation;
+}
+
 bool CameraFeedAndroid::activate_feed() {
+	ERR_FAIL_COND_V_MSG(selected_format == -1, false, "CameraFeed format needs to be set before activating.");
 	if (is_active()) {
 		deactivate_feed();
 	};
@@ -128,7 +159,8 @@ bool CameraFeedAndroid::activate_feed() {
 	}
 
 	// Create image reader
-	media_status_t m_status = AImageReader_new(width, height, format, 1, &reader);
+	const FeedFormat& feed_format = formats[selected_format];
+	media_status_t m_status = AImageReader_new(feed_format.width, feed_format.height, format, 1, &reader);
 	if (m_status != AMEDIA_OK) {
 		onError(this, device, m_status);
 		return false;
@@ -136,11 +168,11 @@ bool CameraFeedAndroid::activate_feed() {
 
 	// Create image buffers
 	set_image(RenderingServer::CANVAS_TEXTURE_CHANNEL_DIFFUSE,
-			Image::create_empty(width, height, false, Image::FORMAT_R8));
+			Image::create_empty(feed_format.width, feed_format.height, false, Image::FORMAT_R8));
 	set_image(RenderingServer::CANVAS_TEXTURE_CHANNEL_NORMAL,
-			Image::create_empty(width / 2, height / 2, false, Image::FORMAT_RG8));
+			Image::create_empty(feed_format.width / 2, feed_format.height / 2, false, Image::FORMAT_RG8));
 	//    set_image(RenderingServer::CANVAS_TEXTURE_CHANNEL_SPECULAR,
-	//              Image::create_empty(width, height, false, Image::FORMAT_R8));
+	//              Image::create_empty(feed_format.width, feed_format.height, false, Image::FORMAT_R8));
 
 	// Get image listener
 	static AImageReader_ImageListener listener{
@@ -226,6 +258,32 @@ bool CameraFeedAndroid::activate_feed() {
 	return true;
 }
 
+bool CameraFeedAndroid::set_format(int p_index, const Dictionary &p_parameters) {
+	ERR_FAIL_COND_V_MSG(active, false, "Feed is active.");
+	ERR_FAIL_INDEX_V_MSG(p_index, formats.size(), false, "Invalid format index.");
+
+	selected_format = p_index;
+	emit_signal(SNAME("format_changed"));
+	return true;
+}
+
+Array CameraFeedAndroid::get_formats() const {
+	Array result;
+	for (const FeedFormat &feed_format : formats) {
+		Dictionary dictionary;
+		dictionary["width"] = feed_format.width;
+		dictionary["height"] = feed_format.height;
+		dictionary["format"] = feed_format.format;
+		result.push_back(dictionary);
+	}
+	return result;
+}
+
+FeedFormat CameraFeedAndroid::get_format() const {
+	FeedFormat feed_format = {};
+	return selected_format == -1 ? feed_format : formats[selected_format];
+}
+
 void CameraFeedAndroid::onImage(void *context, AImageReader *p_reader) {
 	auto *feed = static_cast<CameraFeedAndroid *>(context);
 
@@ -246,6 +304,31 @@ void CameraFeedAndroid::onImage(void *context, AImageReader *p_reader) {
 	feed->set_image(RenderingServer::CANVAS_TEXTURE_CHANNEL_NORMAL, data, 0, len);
 	//    AImage_getPlaneData(image, 2, &data, &len);
 	//    feed->set_image(RenderingServer::CANVAS_TEXTURE_CHANNEL_SPECULAR, data, 0, len);
+
+	// Orientation
+	int32_t orientation = get_orientation();
+	if (position == CameraFeed::FEED_FRONT) {
+		orientation = orientation % 360;
+		orientation = (360 - orientation) % 360;
+	} else {
+		orientation = (orientation + 360) % 360;
+	}
+	Transform2D display_transform;
+	switch (orientation) {
+		case 90:
+			display_transform = Transform2D(1.0, 0.0, 0.0, -1.0, 0.0, 1.0);
+			break;
+		case 180:
+			display_transform = Transform2D(0.0, 1.0, 1.0, 0.0, 0.0, 0.0);
+			break;
+		case 270:
+			display_transform = Transform2D(-1.0, 0.0, 0.0, 1.0, 1.0, 0.0);
+			break;
+		default:
+			display_transform = Transform2D(0.0, -1.0, -1.0, 0.0, 1.0, 1.0);
+			break;
+	}
+	set_transform(display_transform);
 
 	// Release image
 	AImage_delete(image);
@@ -308,6 +391,11 @@ void CameraAndroid::update_feeds() {
 		return;
 	}
 
+	// remove existing devices
+	for (int i = feeds.size() - 1; i >= 0; i--) {
+		remove_feed(feeds[i]);
+	}
+
 	for (int c = 0; c < cameraIds->numCameras; ++c) {
 		const char *id = cameraIds->cameraIds[c];
 		ACameraMetadata *metadata;
@@ -315,41 +403,50 @@ void CameraAndroid::update_feeds() {
 
 		// Get position
 		ACameraMetadata_const_entry lensInfo;
-		ACameraMetadata_getConstEntry(metadata, ACAMERA_LENS_FACING, &lensInfo);
-		uint8_t position = static_cast<acamera_metadata_enum_android_lens_facing_t>(lensInfo.data.u8[0]);
+		godot::CameraFeed::FeedPosition position = godot::CameraFeed::FEED_UNSPECIFIED;
+		camera_status_t status;
+		status = ACameraMetadata_getConstEntry(metadata, ACAMERA_LENS_FACING, &lensInfo);
+		if (status != ACAMERA_OK) {
+			continue;
+		}
+		uint8_t lens_facing = static_cast<acamera_metadata_enum_android_lens_facing_t>(lensInfo.data.u8[0]);
+		if (lens_facing == ACAMERA_LENS_FACING_FRONT) {
+			position = godot::CameraFeed::FEED_FRONT;
+		} else if (lens_facing == ACAMERA_LENS_FACING_BACK) {
+			position = godot::CameraFeed::FEED_BACK;
+		} else {
+			continue;
+		}
 
-		// Get sensor orientation
-		ACameraMetadata_const_entry orientation;
-		ACameraMetadata_getConstEntry(metadata, ACAMERA_SENSOR_ORIENTATION, &orientation);
-		int32_t cameraOrientation = orientation.data.i32[0];
+		Ref<CameraFeedAndroid> feed = memnew(CameraFeedAndroid(cameraManager, metadata, id, position));
 
 		// Get supported formats
 		ACameraMetadata_const_entry formats;
-		ACameraMetadata_getConstEntry(metadata, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &formats);
-		for (uint32_t f = 0; f < formats.count; f += 4) {
-			// Only support output streams
-			int32_t input = formats.data.i32[f + 3];
-			if (input) {
-				continue;
-			}
+		status = ACameraMetadata_getConstEntry(metadata, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &formats);
 
-			// Get format and resolution
-			int32_t format = formats.data.i32[f + 0];
-			if (format == AIMAGE_FORMAT_YUV_420_888 || format == AIMAGE_FORMAT_RGB_888 ||
-					format == AIMAGE_FORMAT_RGBA_8888) {
-				int32_t width = formats.data.i32[f + 1];
-				int32_t height = formats.data.i32[f + 2];
-				Ref<CameraFeedAndroid> feed = new CameraFeedAndroid(cameraManager, id,
-						position,
-						width,
-						height,
-						format,
-						cameraOrientation);
-				add_feed(feed);
-				print_line("Added camera feed: ", feed->get_name());
+		if (status == ACAMERA_OK) {
+			for (uint32_t f = 0; f < formats.count; f += 4) {
+				// Only support output streams
+				int32_t input = formats.data.i32[f + 3];
+				if (input) {
+					continue;
+				}
+
+				// Get format and resolution
+				int32_t format = formats.data.i32[f + 0];
+				if (format == AIMAGE_FORMAT_YUV_420_888
+					|| format == AIMAGE_FORMAT_RGB_888
+					|| format == AIMAGE_FORMAT_RGBA_8888) {
+					FeedFormat feed_format;
+					feed_format.width = formats.data.i32[f + 1];
+					feed_format.height = formats.data.i32[f + 2];
+					feed_format.format = GetFormatName(format);
+					feed_format.pixel_format = format;
+					feed.formats.append(feed_format);
+				}
 			}
 		}
-
+		add_feed(feed);
 		ACameraMetadata_free(metadata);
 	}
 
